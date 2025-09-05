@@ -41,7 +41,7 @@ app.post('/scrape', async (req, res) => {
         page.setDefaultTimeout(timeout);
         
         await page.setViewport({
-            width: 1050,  // UPDATED from new recording
+            width: 1050,
             height: 857
         });
         
@@ -56,7 +56,7 @@ app.post('/scrape', async (req, res) => {
                 
                 results.screenshots.push({
                     pageNumber: pageNum,
-                    filename: `${config.county}-${pageNum}-${description}-${Date.now()}.png`,
+                    filename: `${config.county || 'unknown'}-${pageNum}-${description}-${Date.now()}.png`,
                     description: description,
                     timestamp: new Date().toISOString(),
                     data: screenshot
@@ -147,8 +147,8 @@ app.post('/scrape', async (req, res) => {
         
         // START FROM HOMEPAGE
         console.log('Navigating to TexasFile homepage...');
-        await page.goto('https://www.texasfile.com/');
-        await page.waitForTimeout(2000);
+        await page.goto('https://www.texasfile.com/', { waitUntil: 'networkidle2' });
+        await page.waitForTimeout(3000);
         
         // Check if logged in
         const isLoggedIn = await checkLoginStatus();
@@ -167,195 +167,181 @@ app.post('/scrape', async (req, res) => {
             results.wasAlreadyLoggedIn = true;
         }
         
-        // Click "Search County Records" button from homepage
-        console.log('Clicking Search County Records...');
-        const searchCountyPromises = [];
-        const startSearchCountyWaiting = () => {
-            searchCountyPromises.push(page.waitForNavigation());
+        // SIMPLIFIED: Navigate directly to search page instead of clicking
+        console.log('Navigating to search page...');
+        await page.goto('https://www.texasfile.com/search/texas/', { waitUntil: 'networkidle2' });
+        await page.waitForTimeout(3000);
+        
+        // DYNAMIC COUNTY SELECTION - Fixed
+        console.log(`Selecting county: ${config.county || 'Travis'}...`);
+        const countyName = config.county || 'Travis';
+        
+        // Try multiple methods to click county
+        let countyClicked = false;
+        
+        // Method 1: Direct click on link containing county name
+        try {
+            await page.evaluate((county) => {
+                const links = Array.from(document.querySelectorAll('a'));
+                const countyLink = links.find(link => link.textContent.includes(county));
+                if (countyLink) {
+                    countyLink.click();
+                    return true;
+                }
+                return false;
+            }, countyName);
+            countyClicked = true;
+            await page.waitForNavigation({ waitUntil: 'networkidle2' });
+        } catch (e) {
+            console.log('Method 1 failed, trying alternative...');
         }
         
-        await puppeteer.Locator.race([
-            page.locator('::-p-aria( Search County Records Start your free search in any Texas County) >>>> ::-p-aria([role=\\"paragraph\\"])'),
-            page.locator('div.grid-action-items > div > div:nth-of-type(1) p'),
-            page.locator('::-p-xpath(//*[@id=\\"react_rendered\\"]/div/div[2]/div[2]/div/div[2]/div[1]/div/div[1]/a/div[1]/p)'),
-            page.locator(':scope >>> div.grid-action-items > div > div:nth-of-type(1) p'),
-            page.locator('::-p-text(Search County)')
-        ])
-            .setTimeout(timeout)
-            .on('action', () => startSearchCountyWaiting())
-            .click({
-                offset: {
-                    x: 51.2421875,
-                    y: 10.78125,
-                },
-            });
-        await Promise.all(searchCountyPromises);
-        
-        // DYNAMIC COUNTY SELECTION
-        console.log(`Selecting county: ${config.county}...`);
-        const countyPromises = [];
-        const startCountyWaiting = () => {
-            countyPromises.push(page.waitForNavigation());
+        // Method 2: Use puppeteer selector if Method 1 failed
+        if (!countyClicked) {
+            try {
+                await page.click(`a:has-text("${countyName}")`);
+                await page.waitForNavigation({ waitUntil: 'networkidle2' });
+                countyClicked = true;
+            } catch (e) {
+                console.log('Method 2 failed, trying direct navigation...');
+            }
         }
         
-        // Dynamic county selector based on config
-        await puppeteer.Locator.race([
-            page.locator(`::-p-aria(${config.county})`),
-            page.locator(`::-p-text(${config.county})`)
-        ])
-            .setTimeout(timeout)
-            .on('action', () => startCountyWaiting())
-            .click({
-                offset: {
-                    x: 31,
-                    y: 16.28125,
-                },
-            });
-        await Promise.all(countyPromises);
+        // Method 3: Direct navigation as fallback
+        if (!countyClicked) {
+            const countyUrl = `https://www.texasfile.com/search/texas/${countyName.toLowerCase().replace(' ', '-')}/county-clerk-records/`;
+            console.log(`Direct navigation to: ${countyUrl}`);
+            await page.goto(countyUrl, { waitUntil: 'networkidle2' });
+        }
         
-        // Fill search term first (for form structure)
-        await puppeteer.Locator.race([
-            page.locator('::-p-aria(Full Name 1 Grantor/Grantee)'),
-            page.locator('div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input'),
-            page.locator('::-p-xpath(//*[@id=\\"Form0Name\\"])'),
-            page.locator(':scope >>> div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input')
-        ])
-            .setTimeout(timeout)
-            .fill('a*');  // Temporary, will be replaced in loop
+        await page.waitForTimeout(2000);
         
-        // DYNAMIC DATE SELECTION - 1 month ago from current date
+        // WAIT FOR SEARCH FORM TO LOAD
+        try {
+            await page.waitForSelector('input#Form0Name', { timeout: 10000 });
+        } catch (e) {
+            console.log('Search form not found, checking if on correct page...');
+            await saveScreenshot('error', 'search-form-not-found');
+        }
+        
+        // Fill initial search term (required for form)
+        console.log('Filling initial search term...');
+        const searchInput = await page.$('input#Form0Name');
+        if (searchInput) {
+            await searchInput.click();
+            await searchInput.type('a*');
+        }
+        
+        // DYNAMIC DATE SELECTION - Fixed and simplified
         console.log('Setting date range to 1 month ago...');
         const oneMonthAgo = new Date();
         oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
-        const targetYear = oneMonthAgo.getFullYear();
-        const targetMonth = oneMonthAgo.getMonth(); // 0-indexed
-        const targetDay = oneMonthAgo.getDate();
         
         // Click date input
-        await puppeteer.Locator.race([
-            page.locator('div.dateSelectorWithRange > div:nth-of-type(1) > div:nth-of-type(2) input'),
-            page.locator('::-p-xpath(//*[@id=\\"react_rendered\\"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[1]/div[1]/div[2]/div/div/input)'),
-            page.locator(':scope >>> div.dateSelectorWithRange > div:nth-of-type(1) > div:nth-of-type(2) input')
-        ])
-            .setTimeout(timeout)
-            .click({
-                offset: {
-                    x: 56.5,
-                    y: 38.5625,
-                },
-            });
-        
-        // Click year selector
-        await puppeteer.Locator.race([
-            page.locator('span.react-datepicker__year-read-view--selected-year'),
-            page.locator('::-p-xpath(//*[@id=\\"react_rendered\\"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[1]/div[1]/div[2]/div[2]/div[2]/div/div/div[2]/div[1]/div[2]/div/div/span[2])'),
-            page.locator(':scope >>> span.react-datepicker__year-read-view--selected-year')
-        ])
-            .setTimeout(timeout)
-            .click({
-                offset: {
-                    x: 28.3515625,
-                    y: 7.5,
-                },
-            });
-        
-        // Select year dynamically
-        await page.evaluate((year) => {
-            const yearOptions = document.querySelectorAll('div.react-datepicker__year-dropdown > div');
-            for (let option of yearOptions) {
-                if (option.textContent.trim() === year.toString()) {
-                    option.click();
-                    break;
-                }
+        const dateInput = await page.$('div.dateSelectorWithRange input');
+        if (dateInput) {
+            await dateInput.click();
+            await page.waitForTimeout(1000);
+            
+            // Click year dropdown
+            const yearSelector = await page.$('span.react-datepicker__year-read-view--selected-year');
+            if (yearSelector) {
+                await yearSelector.click();
+                await page.waitForTimeout(500);
+                
+                // Select correct year
+                await page.evaluate((targetYear) => {
+                    const yearOptions = document.querySelectorAll('div.react-datepicker__year-dropdown > div');
+                    for (let option of yearOptions) {
+                        if (option.textContent.trim() === targetYear.toString()) {
+                            option.click();
+                            return;
+                        }
+                    }
+                }, oneMonthAgo.getFullYear());
+                await page.waitForTimeout(500);
             }
-        }, targetYear);
-        await page.waitForTimeout(500);
-        
-        // Navigate to correct month if needed
-        const currentDisplayedMonth = await page.evaluate(() => {
-            const monthElement = document.querySelector('.react-datepicker__current-month');
-            return monthElement ? monthElement.textContent : '';
-        });
-        
-        // Click next/prev month buttons as needed to reach target month
-        const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
-                          'July', 'August', 'September', 'October', 'November', 'December'];
-        const targetMonthName = monthNames[targetMonth];
-        
-        if (!currentDisplayedMonth.includes(targetMonthName)) {
-            // Navigate months - simplified, may need more logic for complex cases
-            for (let i = 0; i < 12; i++) {
-                const displayed = await page.evaluate(() => {
+            
+            // Navigate to correct month
+            const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+                              'July', 'August', 'September', 'October', 'November', 'December'];
+            const targetMonthName = monthNames[oneMonthAgo.getMonth()];
+            const targetYear = oneMonthAgo.getFullYear();
+            
+            // Click month navigation buttons if needed
+            for (let attempts = 0; attempts < 12; attempts++) {
+                const currentMonth = await page.evaluate(() => {
                     const elem = document.querySelector('.react-datepicker__current-month');
                     return elem ? elem.textContent : '';
                 });
                 
-                if (displayed.includes(targetMonthName)) break;
-                
-                // Click next month
-                await puppeteer.Locator.race([
-                    page.locator('::-p-aria(Next Month)'),
-                    page.locator('button.react-datepicker__navigation--next')
-                ])
-                    .setTimeout(timeout)
-                    .click();
-                await page.waitForTimeout(300);
-            }
-        }
-        
-        // Select the day
-        await page.evaluate((day) => {
-            const dayElements = document.querySelectorAll('.react-datepicker__day');
-            for (let elem of dayElements) {
-                if (elem.textContent.trim() === day.toString() && 
-                    !elem.classList.contains('react-datepicker__day--outside-month')) {
-                    elem.click();
+                if (currentMonth.includes(targetMonthName) && currentMonth.includes(targetYear)) {
                     break;
                 }
+                
+                // Determine if we need to go forward or backward
+                const nextButton = await page.$('button.react-datepicker__navigation--next');
+                const prevButton = await page.$('button.react-datepicker__navigation--previous');
+                
+                if (nextButton) {
+                    await nextButton.click();
+                    await page.waitForTimeout(300);
+                }
             }
-        }, targetDay);
+            
+            // Click the specific day
+            await page.evaluate((day) => {
+                const dayElements = document.querySelectorAll('.react-datepicker__day');
+                for (let elem of dayElements) {
+                    if (elem.textContent.trim() === day.toString() &&
+                        !elem.classList.contains('react-datepicker__day--outside-month')) {
+                        elem.click();
+                        return;
+                    }
+                }
+            }, oneMonthAgo.getDate());
+            
+            await page.waitForTimeout(1000);
+        }
         
-        // DYNAMIC DOCUMENT TYPE SELECTION
+        // DOCUMENT TYPE SELECTION - Fixed
         console.log(`Selecting document type: ${config.documentType || 'Deed of Trust'}...`);
         const docTypeToSelect = config.documentType || 'Deed of Trust';
         
-        // Try to find the document type checkbox dynamically
-        const docTypeSelected = await page.evaluate((docType) => {
+        // Find and click document type
+        const docTypeClicked = await page.evaluate((docType) => {
             const labels = document.querySelectorAll('fieldset label');
-            for (let i = 0; i < labels.length; i++) {
-                const labelText = labels[i].textContent.trim();
-                if (labelText === docType || labelText.includes(docType)) {
-                    const checkbox = labels[i].querySelector('input[type="checkbox"]') || 
-                                   labels[i].querySelector('span');
-                    if (checkbox) {
-                        checkbox.click();
+            for (let label of labels) {
+                if (label.textContent.includes(docType)) {
+                    // Try to click the span or input inside the label
+                    const clickable = label.querySelector('span, input');
+                    if (clickable) {
+                        clickable.click();
                         return true;
                     }
+                    // Fallback: click the label itself
+                    label.click();
+                    return true;
                 }
             }
             return false;
         }, docTypeToSelect);
         
-        // Fallback to specific selector if dynamic selection failed
-        if (!docTypeSelected) {
-            await puppeteer.Locator.race([
-                page.locator('label:nth-of-type(79) > span'),
-                page.locator('::-p-xpath(//*[@id=\\"react_rendered\\"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[3]/div/div/fieldset/label[79]/span)'),
-                page.locator(':scope >>> label:nth-of-type(79) > span')
-            ])
-                .setTimeout(timeout)
-                .click({
-                    offset: {
-                        x: 6.5,
-                        y: 7.5625,
-                    },
-                });
+        if (!docTypeClicked) {
+            console.log('Could not find document type, using default selector...');
+            try {
+                await page.click('label:nth-of-type(79) > span');
+            } catch (e) {
+                console.log('Default document type selector also failed');
+            }
         }
         
-        // ALPHABET LOOP - keeping all existing functionality
+        await page.waitForTimeout(1000);
+        
+        // ALPHABET LOOP
         const alphabet = 'abcdefghijklmnopqrstuvwxyz'.split('');
         const startLetter = config.startLetter || 'a';
-        const endLetter = config.endLetter || 'z';
+        const endLetter = config.endLetter || 'c';  // Limited for testing
         const startIndex = alphabet.indexOf(startLetter.toLowerCase());
         const endIndex = alphabet.indexOf(endLetter.toLowerCase());
         const lettersToSearch = alphabet.slice(startIndex, endIndex + 1);
@@ -377,62 +363,31 @@ app.post('/scrape', async (req, res) => {
             };
             
             try {
-                // Clear and enter new search term
-                await puppeteer.Locator.race([
-                    page.locator('::-p-aria(Full Name 1 Grantor/Grantee)'),
-                    page.locator('div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input'),
-                    page.locator('::-p-xpath(//*[@id=\\"Form0Name\\"])'),
-                    page.locator(':scope >>> div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input')
-                ])
-                    .setTimeout(timeout)
-                    .click({
-                        offset: {
-                            x: 112,
-                            y: 25.5625,
-                        },
-                    });
-                
-                // Clear field
-                await page.keyboard.down('Control');
-                await page.keyboard.press('A');
-                await page.keyboard.up('Control');
-                await page.keyboard.press('Backspace');
-                
-                // Type new search term
-                await puppeteer.Locator.race([
-                    page.locator('::-p-aria(Full Name 1 Grantor/Grantee)'),
-                    page.locator('div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input'),
-                    page.locator('::-p-xpath(//*[@id=\\"Form0Name\\"])'),
-                    page.locator(':scope >>> div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input')
-                ])
-                    .setTimeout(timeout)
-                    .fill(searchTerm);
-                
-                // Submit search
-                const searchPromises = [];
-                const startSearchWaiting = () => {
-                    searchPromises.push(page.waitForNavigation());
+                // Find and clear search input
+                const searchField = await page.$('input#Form0Name');
+                if (searchField) {
+                    await searchField.click({ clickCount: 3 });
+                    await page.keyboard.press('Backspace');
+                    await searchField.type(searchTerm);
                 }
                 
-                await puppeteer.Locator.race([
-                    page.locator('#nameSearchBtn'),
-                    page.locator('::-p-xpath(//*[@id=\\"nameSearchBtn\\"])'),
-                    page.locator(':scope >>> #nameSearchBtn')
-                ])
-                    .setTimeout(timeout)
-                    .on('action', () => startSearchWaiting())
-                    .click({
-                        offset: {
-                            x: 303,  // Updated from new recording
-                            y: 15.5625,
-                        },
-                    });
-                await Promise.all(searchPromises);
+                // Submit search
+                const searchButton = await page.$('#nameSearchBtn');
+                if (searchButton) {
+                    await Promise.race([
+                        page.waitForNavigation({ waitUntil: 'networkidle2' }),
+                        searchButton.click()
+                    ]);
+                }
                 
-                await page.waitForTimeout(2000);
+                await page.waitForTimeout(3000);
                 
                 // Check for results
-                const noResults = await page.$('.no-results');
+                const noResults = await page.evaluate(() => {
+                    const bodyText = document.body.innerText;
+                    return bodyText.includes('No results') || bodyText.includes('0 results');
+                });
+                
                 if (noResults) {
                     console.log(`No results for ${searchTerm}`);
                     allLetterResults[letter] = letterResults;
@@ -443,11 +398,14 @@ app.post('/scrape', async (req, res) => {
                 const pageInfo = await page.evaluate(() => {
                     const pageText = document.body.innerText;
                     const match = pageText.match(/Page\s+(\d+)\s+of\s+(\d+)/i);
-                    return match ? { current: parseInt(match[1]), total: parseInt(match[2]) } : { current: 1, total: 1 };
+                    return match ? {
+                        current: parseInt(match[1]),
+                        total: parseInt(match[2])
+                    } : { current: 1, total: 1 };
                 });
                 
                 letterResults.totalPages = pageInfo.total;
-                const maxPagesPerLetter = config.maxPagesPerLetter || 3;
+                const maxPagesPerLetter = config.maxPagesPerLetter || 2;
                 const pagesToScrape = Math.min(maxPagesPerLetter, pageInfo.total);
                 
                 // Scrape each page
@@ -487,32 +445,20 @@ app.post('/scrape', async (req, res) => {
                     
                     letterResults.pagesScraped++;
                     
-                    // Navigate to next page using exact selectors from recording
+                    // Navigate to next page
                     if (currentPage < pagesToScrape) {
-                        try {
-                            const navPromises = [];
-                            const startNavWaiting = () => {
-                                navPromises.push(page.waitForNavigation());
+                        const nextButton = await page.$('i.fi-chevron-right');
+                        if (nextButton) {
+                            try {
+                                await Promise.race([
+                                    page.waitForNavigation({ waitUntil: 'networkidle2' }),
+                                    nextButton.click()
+                                ]);
+                                await page.waitForTimeout(2000);
+                            } catch (navError) {
+                                console.log('Could not navigate to next page');
+                                break;
                             }
-                            
-                            await puppeteer.Locator.race([
-                                page.locator('div.u-hide--small-only i.fi-chevron-right'),
-                                page.locator('::-p-xpath(//*[@id=\\"react_rendered\\"]/div/form/div/div[2]/div[3]/div[1]/div/div[2]/div[2]/div/div[1]/div[2]/div/ul/li[4]/a/span/i[1])'),
-                                page.locator(':scope >>> div.u-hide--small-only i.fi-chevron-right')
-                            ])
-                                .setTimeout(timeout)
-                                .on('action', () => startNavWaiting())
-                                .click({
-                                    offset: {
-                                        x: 7.375,  // Updated from new recording
-                                        y: 7,
-                                    },
-                                });
-                            await Promise.all(navPromises);
-                            await page.waitForTimeout(2000);
-                        } catch (navError) {
-                            console.log('Could not navigate to next page');
-                            break;
                         }
                     }
                 }
@@ -530,9 +476,9 @@ app.post('/scrape', async (req, res) => {
             }
         }
         
-        // Compile results - KEEPING ALL EXISTING CODE
+        // Compile results
         results.letterSearches = allLetterResults;
-        results.totalRecords = Object.values(allLetterResults).reduce((sum, lr) => 
+        results.totalRecords = Object.values(allLetterResults).reduce((sum, lr) =>
             sum + lr.records.reduce((s, r) => s + r.recordCount, 0), 0
         );
         results.totalPages = Object.values(allLetterResults).reduce((sum, lr) => sum + lr.totalPages, 0);
@@ -546,7 +492,7 @@ app.post('/scrape', async (req, res) => {
                     flatRecords.push({
                         ...record,
                         searchLetter: letter.toUpperCase(),
-                        county: config.county,
+                        county: config.county || 'Unknown',
                         pageNumber: page.pageNumber,
                         executionId: results.executionId
                     });
