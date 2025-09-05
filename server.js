@@ -40,8 +40,8 @@ app.post('/scrape', async (req, res) => {
         page.setDefaultTimeout(timeout);
         
         await page.setViewport({
-            width: 1280,
-            height: 1024
+            width: 855,
+            height: 857
         });
         
         // Helper function to save screenshots
@@ -142,9 +142,7 @@ app.post('/scrape', async (req, res) => {
         
         // Navigate to TexasFile
         console.log('Navigating to TexasFile...');
-        await page.goto('https://www.texasfile.com/search/texas/', {
-            waitUntil: 'networkidle2'
-        });
+        await page.goto('https://www.texasfile.com/search/texas/');
         
         // Check login and login if needed
         const isLoggedIn = await checkLoginStatus();
@@ -152,34 +150,94 @@ app.post('/scrape', async (req, res) => {
             await performLogin();
         }
         
-        // Select county
+        // Select county using exact selectors from recording
         console.log(`Selecting county: ${config.county}...`);
-        try {
-            await page.click(`a:has-text("${config.county}")`);
-            await page.waitForNavigation();
-        } catch (e) {
-            console.log('Could not select county, trying alternative method...');
-            await page.goto(`https://www.texasfile.com/search/texas/${config.county.toLowerCase()}/county-clerk-records/`, {
-                waitUntil: 'networkidle2'
-            });
+        const promises = [];
+        const startWaitingForEvents = () => {
+            promises.push(page.waitForNavigation());
         }
         
-        // Set date range (from config.startDate)
+        await puppeteer.Locator.race([
+            page.locator(`::-p-aria(${config.county})`),
+            page.locator(`::-p-text(${config.county})`)
+        ])
+            .setTimeout(timeout)
+            .on('action', () => startWaitingForEvents())
+            .click();
+        await Promise.all(promises);
+        
+        // Click date input using exact selectors
         console.log('Setting date range...');
-        const dateInput = await page.$('div.dateSelectorWithRange input');
-        if (dateInput) {
-            await dateInput.click();
-            await page.waitForTimeout(1000);
-            // Select year and date logic here
-        }
+        await puppeteer.Locator.race([
+            page.locator('div.dateSelectorWithRange > div:nth-of-type(1) > div:nth-of-type(2) input'),
+            page.locator('::-p-xpath(//*[@id="react_rendered"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[1]/div[1]/div[2]/div/div/input)'),
+            page.locator(':scope >>> div.dateSelectorWithRange > div:nth-of-type(1) > div:nth-of-type(2) input')
+        ])
+            .setTimeout(timeout)
+            .click({
+                offset: {
+                    x: 64.25,
+                    y: 23.5625,
+                },
+            });
         
-        // Select document type (Deed of Trust)
+        // Click year selector
+        await puppeteer.Locator.race([
+            page.locator('span.react-datepicker__year-read-view--selected-year'),
+            page.locator('::-p-xpath(//*[@id="react_rendered"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[1]/div[1]/div[2]/div[2]/div[2]/div/div/div[2]/div[1]/div[2]/div/div/span[2])'),
+            page.locator(':scope >>> span.react-datepicker__year-read-view--selected-year')
+        ])
+            .setTimeout(timeout)
+            .click({
+                offset: {
+                    x: 17.8515625,
+                    y: 6.5,
+                },
+            });
+        
+        // Select 2025
+        await puppeteer.Locator.race([
+            page.locator('div.react-datepicker__year-dropdown > div:nth-of-type(1)'),
+            page.locator('::-p-xpath(//*[@id="react_rendered"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[1]/div[1]/div[2]/div[2]/div[2]/div/div/div[2]/div[1]/div[2]/div/div[1]/div[1])'),
+            page.locator(':scope >>> div.react-datepicker__year-dropdown > div:nth-of-type(1)')
+        ])
+            .setTimeout(timeout)
+            .click({
+                offset: {
+                    x: 41.140625,
+                    y: 6.5,
+                },
+            });
+        
+        // Select January 1st
+        await puppeteer.Locator.race([
+            page.locator('::-p-aria(Choose Wednesday, January 1st, 2025)'),
+            page.locator('div:nth-of-type(1) > div.react-datepicker__day--001'),
+            page.locator('::-p-xpath(//*[@id="react_rendered"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[1]/div[1]/div[2]/div[2]/div[2]/div/div/div[2]/div[2]/div[1]/div[4])'),
+            page.locator(':scope >>> div:nth-of-type(1) > div.react-datepicker__day--001')
+        ])
+            .setTimeout(timeout)
+            .click({
+                offset: {
+                    x: 13.875,
+                    y: 14.359375,
+                },
+            });
+        
+        // Select document type (Deed of Trust) - exact selector from recording
         console.log('Selecting document type...');
-        const docTypeSelector = 'label:has-text("Deed of Trust") input, label:nth-of-type(79) > span';
-        const docType = await page.$(docTypeSelector);
-        if (docType) {
-            await docType.click();
-        }
+        await puppeteer.Locator.race([
+            page.locator('label:nth-of-type(79) > span'),
+            page.locator('::-p-xpath(//*[@id="react_rendered"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[3]/div/div/fieldset/label[79]/span)'),
+            page.locator(':scope >>> label:nth-of-type(79) > span')
+        ])
+            .setTimeout(timeout)
+            .click({
+                offset: {
+                    x: 9.25,
+                    y: 5.5625,
+                },
+            });
         
         // ALPHABET LOOP
         const alphabet = 'abcdefghijklmnopqrstuvwxyz'.split('');
@@ -206,21 +264,58 @@ app.post('/scrape', async (req, res) => {
             };
             
             try {
-                // Clear and enter search term
-                const nameInput = await page.$('input#Form0Name, div.tabs-content input');
-                if (nameInput) {
-                    await nameInput.click({ clickCount: 3 });
-                    await page.keyboard.press('Backspace');
-                    await nameInput.type(searchTerm);
+                // Click and fill search field using exact selectors from recording
+                await puppeteer.Locator.race([
+                    page.locator('::-p-aria(Full Name 1 Grantor/Grantee)'),
+                    page.locator('div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input'),
+                    page.locator('::-p-xpath(//*[@id="Form0Name"])'),
+                    page.locator(':scope >>> div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input')
+                ])
+                    .setTimeout(timeout)
+                    .click({
+                        offset: {
+                            x: 112,
+                            y: 25.5625,
+                        },
+                    });
+                
+                // Clear and type search term
+                await page.keyboard.down('Control');
+                await page.keyboard.press('A');
+                await page.keyboard.up('Control');
+                await page.keyboard.press('Backspace');
+                
+                await puppeteer.Locator.race([
+                    page.locator('::-p-aria(Full Name 1 Grantor/Grantee)'),
+                    page.locator('div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input'),
+                    page.locator('::-p-xpath(//*[@id="Form0Name"])'),
+                    page.locator(':scope >>> div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input')
+                ])
+                    .setTimeout(timeout)
+                    .fill(searchTerm);
+                
+                // Submit search using exact selector
+                const searchPromises = [];
+                const startSearchWaiting = () => {
+                    searchPromises.push(page.waitForNavigation());
                 }
                 
-                // Submit search
-                await Promise.all([
-                    page.waitForNavigation(),
-                    page.click('#nameSearchBtn')
-                ]);
+                await puppeteer.Locator.race([
+                    page.locator('#nameSearchBtn'),
+                    page.locator('::-p-xpath(//*[@id="nameSearchBtn"])'),
+                    page.locator(':scope >>> #nameSearchBtn')
+                ])
+                    .setTimeout(timeout)
+                    .on('action', () => startSearchWaiting())
+                    .click({
+                        offset: {
+                            x: 312,
+                            y: 17.5625,
+                        },
+                    });
+                await Promise.all(searchPromises);
                 
-                await page.waitForSelector('table, .results-container, .no-results', { timeout: 30000 });
+                await page.waitForTimeout(2000);
                 
                 // Check for results
                 const noResults = await page.$('.no-results');
@@ -245,18 +340,7 @@ app.post('/scrape', async (req, res) => {
                 for (let currentPage = 1; currentPage <= pagesToScrape; currentPage++) {
                     console.log(`Scraping page ${currentPage} of ${pagesToScrape} for ${searchTerm}...`);
                     
-                    // Take screenshot
-                    const screenshot = await page.screenshot({
-                        fullPage: true,
-                        type: 'png',
-                        encoding: 'base64'
-                    });
-                    
-                    letterResults.screenshots.push({
-                        letter: letter.toUpperCase(),
-                        pageNumber: currentPage,
-                        data: screenshot
-                    });
+                    await saveScreenshot(`${letter}-${currentPage}`, `letter-${letter}-page-${currentPage}`);
                     
                     // Extract data
                     const pageData = await page.evaluate(() => {
@@ -265,11 +349,14 @@ app.post('/scrape', async (req, res) => {
                         
                         rows.forEach(row => {
                             const cells = row.querySelectorAll('td');
-                            if (cells.length >= 3) {
+                            if (cells.length >= 8) {
                                 records.push({
                                     docNumber: cells[0]?.innerText?.trim() || '',
                                     docType: cells[1]?.innerText?.trim() || '',
                                     date: cells[2]?.innerText?.trim() || '',
+                                    book: cells[3]?.innerText?.trim() || '',
+                                    page: cells[4]?.innerText?.trim() || '',
+                                    numberOfPages: cells[5]?.innerText?.trim() || '',
                                     grantor: cells[6]?.innerText?.trim() || '',
                                     grantee: cells[7]?.innerText?.trim() || ''
                                 });
@@ -286,13 +373,28 @@ app.post('/scrape', async (req, res) => {
                     
                     letterResults.pagesScraped++;
                     
-                    // Navigate to next page if not last
+                    // Navigate to next page using exact selectors from recording
                     if (currentPage < pagesToScrape) {
                         try {
-                            await Promise.all([
-                                page.waitForNavigation(),
-                                page.click('a[aria-label="Next"], i.fi-chevron-right')
-                            ]);
+                            const navPromises = [];
+                            const startNavWaiting = () => {
+                                navPromises.push(page.waitForNavigation());
+                            }
+                            
+                            await puppeteer.Locator.race([
+                                page.locator('div.u-hide--small-only i.fi-chevron-right'),
+                                page.locator('::-p-xpath(//*[@id="react_rendered"]/div/form/div/div[2]/div[3]/div[1]/div/div[2]/div[2]/div/div[1]/div[2]/div/ul/li[4]/a/span/i[1])'),
+                                page.locator(':scope >>> div.u-hide--small-only i.fi-chevron-right')
+                            ])
+                                .setTimeout(timeout)
+                                .on('action', () => startNavWaiting())
+                                .click({
+                                    offset: {
+                                        x: 8.375,
+                                        y: 6.8046875,
+                                    },
+                                });
+                            await Promise.all(navPromises);
                             await page.waitForTimeout(2000);
                         } catch (navError) {
                             console.log('Could not navigate to next page');
@@ -310,6 +412,7 @@ app.post('/scrape', async (req, res) => {
                     letter: letter,
                     error: letterError.message
                 });
+                await saveScreenshot(`error-${letter}`, `error-letter-${letter}`);
             }
         }
         
@@ -337,6 +440,9 @@ app.post('/scrape', async (req, res) => {
             });
         }
         results.flatRecords = flatRecords;
+        results.screenshots = results.screenshots.concat(
+            Object.values(allLetterResults).flatMap(lr => lr.screenshots || [])
+        );
         
         console.log(`Complete: ${results.totalRecords} records, ${results.pagesScraped} pages`);
         
