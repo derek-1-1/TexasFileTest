@@ -21,7 +21,8 @@ app.post('/scrape', async (req, res) => {
         errors: [],
         captchaEncountered: false,
         loginPerformed: false,
-        wasAlreadyLoggedIn: false
+        wasAlreadyLoggedIn: false,
+        needsManualLogin: false  // ADD THIS
     };
     
     let browser;
@@ -140,15 +141,39 @@ app.post('/scrape', async (req, res) => {
             }
         }
         
-        // Navigate to TexasFile
-        console.log('Navigating to TexasFile...');
-        await page.goto('https://www.texasfile.com/search/texas/');
+        // CHANGE: Navigate to TexasFile LOGIN PAGE FIRST
+        console.log('Navigating to TexasFile login page...');
+        await page.goto('https://www.texasfile.com/login');
+        await page.waitForTimeout(2000);
         
-        // Check login and login if needed
-        const isLoggedIn = await checkLoginStatus();
-        if (!isLoggedIn) {
-            await performLogin();
+        // CHECK IF WE'RE REDIRECTED (ALREADY LOGGED IN)
+        const currentUrl = page.url();
+        const pageContent = await page.content();
+        const isAlreadyLoggedIn = !currentUrl.includes('/login') || 
+                                 pageContent.includes('Logout') || 
+                                 pageContent.includes('Dashboard');
+        
+        if (!isAlreadyLoggedIn) {
+            // Check login and login if needed
+            const isLoggedIn = await checkLoginStatus();
+            if (!isLoggedIn) {
+                const loginSuccess = await performLogin();
+                if (!loginSuccess && (!config.texasFileUsername || !config.texasFilePassword)) {
+                    // NO CREDENTIALS PROVIDED - NEED MANUAL LOGIN
+                    results.needsManualLogin = true;
+                    results.message = 'Manual login required. Please log in via BrowserBase Session Inspector.';
+                    await saveScreenshot('login', 'manual-login-required');
+                    return res.json(results);
+                }
+            }
+        } else {
+            results.wasAlreadyLoggedIn = true;
         }
+        
+        // NOW NAVIGATE TO SEARCH PAGE
+        console.log('Navigating to search page...');
+        await page.goto('https://www.texasfile.com/search/texas/');
+        await page.waitForTimeout(2000);
         
         // Select county using exact selectors from recording
         console.log(`Selecting county: ${config.county}...`);
