@@ -22,7 +22,7 @@ app.post('/scrape', async (req, res) => {
         captchaEncountered: false,
         loginPerformed: false,
         wasAlreadyLoggedIn: false,
-        needsManualLogin: false  // ADD THIS
+        needsManualLogin: false
     };
     
     let browser;
@@ -41,7 +41,7 @@ app.post('/scrape', async (req, res) => {
         page.setDefaultTimeout(timeout);
         
         await page.setViewport({
-            width: 855,
+            width: 1050,  // UPDATED from new recording
             height: 857
         });
         
@@ -104,6 +104,10 @@ app.post('/scrape', async (req, res) => {
             try {
                 console.log('Performing login...');
                 
+                // Navigate to login page
+                await page.goto('https://www.texasfile.com/login');
+                await page.waitForTimeout(2000);
+                
                 // Try to find and fill username
                 const usernameSelectors = ['input[type="email"]', 'input[name="username"]', '#username'];
                 for (const selector of usernameSelectors) {
@@ -141,130 +145,214 @@ app.post('/scrape', async (req, res) => {
             }
         }
         
-        // CHANGE: Navigate to TexasFile LOGIN PAGE FIRST
-        console.log('Navigating to TexasFile login page...');
-        await page.goto('https://www.texasfile.com/login');
+        // START FROM HOMEPAGE
+        console.log('Navigating to TexasFile homepage...');
+        await page.goto('https://www.texasfile.com/');
         await page.waitForTimeout(2000);
         
-        // CHECK IF WE'RE REDIRECTED (ALREADY LOGGED IN)
-        const currentUrl = page.url();
-        const pageContent = await page.content();
-        const isAlreadyLoggedIn = !currentUrl.includes('/login') || 
-                                 pageContent.includes('Logout') || 
-                                 pageContent.includes('Dashboard');
-        
-        if (!isAlreadyLoggedIn) {
-            // Check login and login if needed
-            const isLoggedIn = await checkLoginStatus();
-            if (!isLoggedIn) {
-                const loginSuccess = await performLogin();
-                if (!loginSuccess && (!config.texasFileUsername || !config.texasFilePassword)) {
-                    // NO CREDENTIALS PROVIDED - NEED MANUAL LOGIN
-                    results.needsManualLogin = true;
-                    results.message = 'Manual login required. Please log in via BrowserBase Session Inspector.';
-                    await saveScreenshot('login', 'manual-login-required');
-                    return res.json(results);
-                }
+        // Check if logged in
+        const isLoggedIn = await checkLoginStatus();
+        if (!isLoggedIn) {
+            const loginSuccess = await performLogin();
+            if (!loginSuccess && (!config.texasFileUsername || !config.texasFilePassword)) {
+                results.needsManualLogin = true;
+                results.message = 'Manual login required. Please log in via BrowserBase Session Inspector.';
+                await saveScreenshot('login', 'manual-login-required');
+                return res.json(results);
             }
+            // Go back to homepage after login
+            await page.goto('https://www.texasfile.com/');
+            await page.waitForTimeout(2000);
         } else {
             results.wasAlreadyLoggedIn = true;
         }
         
-        // NOW NAVIGATE TO SEARCH PAGE
-        console.log('Navigating to search page...');
-        await page.goto('https://www.texasfile.com/search/texas/');
-        await page.waitForTimeout(2000);
-        
-        // Select county using exact selectors from recording
-        console.log(`Selecting county: ${config.county}...`);
-        const promises = [];
-        const startWaitingForEvents = () => {
-            promises.push(page.waitForNavigation());
+        // Click "Search County Records" button from homepage
+        console.log('Clicking Search County Records...');
+        const searchCountyPromises = [];
+        const startSearchCountyWaiting = () => {
+            searchCountyPromises.push(page.waitForNavigation());
         }
         
+        await puppeteer.Locator.race([
+            page.locator('::-p-aria( Search County Records Start your free search in any Texas County) >>>> ::-p-aria([role=\\"paragraph\\"])'),
+            page.locator('div.grid-action-items > div > div:nth-of-type(1) p'),
+            page.locator('::-p-xpath(//*[@id=\\"react_rendered\\"]/div/div[2]/div[2]/div/div[2]/div[1]/div/div[1]/a/div[1]/p)'),
+            page.locator(':scope >>> div.grid-action-items > div > div:nth-of-type(1) p'),
+            page.locator('::-p-text(Search County)')
+        ])
+            .setTimeout(timeout)
+            .on('action', () => startSearchCountyWaiting())
+            .click({
+                offset: {
+                    x: 51.2421875,
+                    y: 10.78125,
+                },
+            });
+        await Promise.all(searchCountyPromises);
+        
+        // DYNAMIC COUNTY SELECTION
+        console.log(`Selecting county: ${config.county}...`);
+        const countyPromises = [];
+        const startCountyWaiting = () => {
+            countyPromises.push(page.waitForNavigation());
+        }
+        
+        // Dynamic county selector based on config
         await puppeteer.Locator.race([
             page.locator(`::-p-aria(${config.county})`),
             page.locator(`::-p-text(${config.county})`)
         ])
             .setTimeout(timeout)
-            .on('action', () => startWaitingForEvents())
-            .click();
-        await Promise.all(promises);
+            .on('action', () => startCountyWaiting())
+            .click({
+                offset: {
+                    x: 31,
+                    y: 16.28125,
+                },
+            });
+        await Promise.all(countyPromises);
         
-        // Click date input using exact selectors
-        console.log('Setting date range...');
+        // Fill search term first (for form structure)
+        await puppeteer.Locator.race([
+            page.locator('::-p-aria(Full Name 1 Grantor/Grantee)'),
+            page.locator('div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input'),
+            page.locator('::-p-xpath(//*[@id=\\"Form0Name\\"])'),
+            page.locator(':scope >>> div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input')
+        ])
+            .setTimeout(timeout)
+            .fill('a*');  // Temporary, will be replaced in loop
+        
+        // DYNAMIC DATE SELECTION - 1 month ago from current date
+        console.log('Setting date range to 1 month ago...');
+        const oneMonthAgo = new Date();
+        oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+        const targetYear = oneMonthAgo.getFullYear();
+        const targetMonth = oneMonthAgo.getMonth(); // 0-indexed
+        const targetDay = oneMonthAgo.getDate();
+        
+        // Click date input
         await puppeteer.Locator.race([
             page.locator('div.dateSelectorWithRange > div:nth-of-type(1) > div:nth-of-type(2) input'),
-            page.locator('::-p-xpath(//*[@id="react_rendered"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[1]/div[1]/div[2]/div/div/input)'),
+            page.locator('::-p-xpath(//*[@id=\\"react_rendered\\"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[1]/div[1]/div[2]/div/div/input)'),
             page.locator(':scope >>> div.dateSelectorWithRange > div:nth-of-type(1) > div:nth-of-type(2) input')
         ])
             .setTimeout(timeout)
             .click({
                 offset: {
-                    x: 64.25,
-                    y: 23.5625,
+                    x: 56.5,
+                    y: 38.5625,
                 },
             });
         
         // Click year selector
         await puppeteer.Locator.race([
             page.locator('span.react-datepicker__year-read-view--selected-year'),
-            page.locator('::-p-xpath(//*[@id="react_rendered"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[1]/div[1]/div[2]/div[2]/div[2]/div/div/div[2]/div[1]/div[2]/div/div/span[2])'),
+            page.locator('::-p-xpath(//*[@id=\\"react_rendered\\"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[1]/div[1]/div[2]/div[2]/div[2]/div/div/div[2]/div[1]/div[2]/div/div/span[2])'),
             page.locator(':scope >>> span.react-datepicker__year-read-view--selected-year')
         ])
             .setTimeout(timeout)
             .click({
                 offset: {
-                    x: 17.8515625,
-                    y: 6.5,
+                    x: 28.3515625,
+                    y: 7.5,
                 },
             });
         
-        // Select 2025
-        await puppeteer.Locator.race([
-            page.locator('div.react-datepicker__year-dropdown > div:nth-of-type(1)'),
-            page.locator('::-p-xpath(//*[@id="react_rendered"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[1]/div[1]/div[2]/div[2]/div[2]/div/div/div[2]/div[1]/div[2]/div/div[1]/div[1])'),
-            page.locator(':scope >>> div.react-datepicker__year-dropdown > div:nth-of-type(1)')
-        ])
-            .setTimeout(timeout)
-            .click({
-                offset: {
-                    x: 41.140625,
-                    y: 6.5,
-                },
-            });
+        // Select year dynamically
+        await page.evaluate((year) => {
+            const yearOptions = document.querySelectorAll('div.react-datepicker__year-dropdown > div');
+            for (let option of yearOptions) {
+                if (option.textContent.trim() === year.toString()) {
+                    option.click();
+                    break;
+                }
+            }
+        }, targetYear);
+        await page.waitForTimeout(500);
         
-        // Select January 1st
-        await puppeteer.Locator.race([
-            page.locator('::-p-aria(Choose Wednesday, January 1st, 2025)'),
-            page.locator('div:nth-of-type(1) > div.react-datepicker__day--001'),
-            page.locator('::-p-xpath(//*[@id="react_rendered"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[1]/div[1]/div[2]/div[2]/div[2]/div/div/div[2]/div[2]/div[1]/div[4])'),
-            page.locator(':scope >>> div:nth-of-type(1) > div.react-datepicker__day--001')
-        ])
-            .setTimeout(timeout)
-            .click({
-                offset: {
-                    x: 13.875,
-                    y: 14.359375,
-                },
-            });
+        // Navigate to correct month if needed
+        const currentDisplayedMonth = await page.evaluate(() => {
+            const monthElement = document.querySelector('.react-datepicker__current-month');
+            return monthElement ? monthElement.textContent : '';
+        });
         
-        // Select document type (Deed of Trust) - exact selector from recording
-        console.log('Selecting document type...');
-        await puppeteer.Locator.race([
-            page.locator('label:nth-of-type(79) > span'),
-            page.locator('::-p-xpath(//*[@id="react_rendered"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[3]/div/div/fieldset/label[79]/span)'),
-            page.locator(':scope >>> label:nth-of-type(79) > span')
-        ])
-            .setTimeout(timeout)
-            .click({
-                offset: {
-                    x: 9.25,
-                    y: 5.5625,
-                },
-            });
+        // Click next/prev month buttons as needed to reach target month
+        const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
+                          'July', 'August', 'September', 'October', 'November', 'December'];
+        const targetMonthName = monthNames[targetMonth];
         
-        // ALPHABET LOOP
+        if (!currentDisplayedMonth.includes(targetMonthName)) {
+            // Navigate months - simplified, may need more logic for complex cases
+            for (let i = 0; i < 12; i++) {
+                const displayed = await page.evaluate(() => {
+                    const elem = document.querySelector('.react-datepicker__current-month');
+                    return elem ? elem.textContent : '';
+                });
+                
+                if (displayed.includes(targetMonthName)) break;
+                
+                // Click next month
+                await puppeteer.Locator.race([
+                    page.locator('::-p-aria(Next Month)'),
+                    page.locator('button.react-datepicker__navigation--next')
+                ])
+                    .setTimeout(timeout)
+                    .click();
+                await page.waitForTimeout(300);
+            }
+        }
+        
+        // Select the day
+        await page.evaluate((day) => {
+            const dayElements = document.querySelectorAll('.react-datepicker__day');
+            for (let elem of dayElements) {
+                if (elem.textContent.trim() === day.toString() && 
+                    !elem.classList.contains('react-datepicker__day--outside-month')) {
+                    elem.click();
+                    break;
+                }
+            }
+        }, targetDay);
+        
+        // DYNAMIC DOCUMENT TYPE SELECTION
+        console.log(`Selecting document type: ${config.documentType || 'Deed of Trust'}...`);
+        const docTypeToSelect = config.documentType || 'Deed of Trust';
+        
+        // Try to find the document type checkbox dynamically
+        const docTypeSelected = await page.evaluate((docType) => {
+            const labels = document.querySelectorAll('fieldset label');
+            for (let i = 0; i < labels.length; i++) {
+                const labelText = labels[i].textContent.trim();
+                if (labelText === docType || labelText.includes(docType)) {
+                    const checkbox = labels[i].querySelector('input[type="checkbox"]') || 
+                                   labels[i].querySelector('span');
+                    if (checkbox) {
+                        checkbox.click();
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }, docTypeToSelect);
+        
+        // Fallback to specific selector if dynamic selection failed
+        if (!docTypeSelected) {
+            await puppeteer.Locator.race([
+                page.locator('label:nth-of-type(79) > span'),
+                page.locator('::-p-xpath(//*[@id=\\"react_rendered\\"]/div/form/div/div[2]/div[1]/div[3]/div/div[1]/div[1]/div/div[2]/div[3]/div/div/fieldset/label[79]/span)'),
+                page.locator(':scope >>> label:nth-of-type(79) > span')
+            ])
+                .setTimeout(timeout)
+                .click({
+                    offset: {
+                        x: 6.5,
+                        y: 7.5625,
+                    },
+                });
+        }
+        
+        // ALPHABET LOOP - keeping all existing functionality
         const alphabet = 'abcdefghijklmnopqrstuvwxyz'.split('');
         const startLetter = config.startLetter || 'a';
         const endLetter = config.endLetter || 'z';
@@ -289,11 +377,11 @@ app.post('/scrape', async (req, res) => {
             };
             
             try {
-                // Click and fill search field using exact selectors from recording
+                // Clear and enter new search term
                 await puppeteer.Locator.race([
                     page.locator('::-p-aria(Full Name 1 Grantor/Grantee)'),
                     page.locator('div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input'),
-                    page.locator('::-p-xpath(//*[@id="Form0Name"])'),
+                    page.locator('::-p-xpath(//*[@id=\\"Form0Name\\"])'),
                     page.locator(':scope >>> div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input')
                 ])
                     .setTimeout(timeout)
@@ -304,22 +392,23 @@ app.post('/scrape', async (req, res) => {
                         },
                     });
                 
-                // Clear and type search term
+                // Clear field
                 await page.keyboard.down('Control');
                 await page.keyboard.press('A');
                 await page.keyboard.up('Control');
                 await page.keyboard.press('Backspace');
                 
+                // Type new search term
                 await puppeteer.Locator.race([
                     page.locator('::-p-aria(Full Name 1 Grantor/Grantee)'),
                     page.locator('div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input'),
-                    page.locator('::-p-xpath(//*[@id="Form0Name"])'),
+                    page.locator('::-p-xpath(//*[@id=\\"Form0Name\\"])'),
                     page.locator(':scope >>> div.tabs-content > div > div:nth-of-type(1) > div:nth-of-type(1) input')
                 ])
                     .setTimeout(timeout)
                     .fill(searchTerm);
                 
-                // Submit search using exact selector
+                // Submit search
                 const searchPromises = [];
                 const startSearchWaiting = () => {
                     searchPromises.push(page.waitForNavigation());
@@ -327,15 +416,15 @@ app.post('/scrape', async (req, res) => {
                 
                 await puppeteer.Locator.race([
                     page.locator('#nameSearchBtn'),
-                    page.locator('::-p-xpath(//*[@id="nameSearchBtn"])'),
+                    page.locator('::-p-xpath(//*[@id=\\"nameSearchBtn\\"])'),
                     page.locator(':scope >>> #nameSearchBtn')
                 ])
                     .setTimeout(timeout)
                     .on('action', () => startSearchWaiting())
                     .click({
                         offset: {
-                            x: 312,
-                            y: 17.5625,
+                            x: 303,  // Updated from new recording
+                            y: 15.5625,
                         },
                     });
                 await Promise.all(searchPromises);
@@ -408,15 +497,15 @@ app.post('/scrape', async (req, res) => {
                             
                             await puppeteer.Locator.race([
                                 page.locator('div.u-hide--small-only i.fi-chevron-right'),
-                                page.locator('::-p-xpath(//*[@id="react_rendered"]/div/form/div/div[2]/div[3]/div[1]/div/div[2]/div[2]/div/div[1]/div[2]/div/ul/li[4]/a/span/i[1])'),
+                                page.locator('::-p-xpath(//*[@id=\\"react_rendered\\"]/div/form/div/div[2]/div[3]/div[1]/div/div[2]/div[2]/div/div[1]/div[2]/div/ul/li[4]/a/span/i[1])'),
                                 page.locator(':scope >>> div.u-hide--small-only i.fi-chevron-right')
                             ])
                                 .setTimeout(timeout)
                                 .on('action', () => startNavWaiting())
                                 .click({
                                     offset: {
-                                        x: 8.375,
-                                        y: 6.8046875,
+                                        x: 7.375,  // Updated from new recording
+                                        y: 7,
                                     },
                                 });
                             await Promise.all(navPromises);
@@ -441,7 +530,7 @@ app.post('/scrape', async (req, res) => {
             }
         }
         
-        // Compile results
+        // Compile results - KEEPING ALL EXISTING CODE
         results.letterSearches = allLetterResults;
         results.totalRecords = Object.values(allLetterResults).reduce((sum, lr) => 
             sum + lr.records.reduce((s, r) => s + r.recordCount, 0), 0
